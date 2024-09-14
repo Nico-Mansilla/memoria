@@ -1,0 +1,391 @@
+clear all
+close all
+clc
+
+addpath('C:\Users\nicolas\Desktop\Memoria\casadi-3.6.5-windows64-matlab2018b')
+import casadi.*
+
+% *************************************************************************
+% general Parameters:
+% *************************************************************************
+Ts      = 0.1;                  % Sampling time
+
+% *************************************************************************
+% Vehicle's (Tractor pulling 2 trailers) geometrical proeprties:
+% *************************************************************************
+Nt      = 2;                            % Number of passive trailers
+Lh1     = 0.342;                        % geometrical properties of the vehicle
+L1      = 1.08;
+Lh2     = 0;
+L2      = 0.78;
+
+% *************************************************************************
+% System's properties:
+% *************************************************************************
+nq      = 4*Nt+3;                       % number of states
+nu      = 2;                            % number of inputs (controls)
+nr      = 3;                            % number of staes to be controlled or steered
+indxOutput = [1:Nt+1,2*Nt+2,2*Nt+3];
+ny      = Nt+3;                         % number of states measured (for the MHE): h(q_t)=(b_1,..,b_Nt,theta_0,x0,y0). Note that the attitude and position of the trailers are not measured!!!
+
+% *************************************************************************
+% Model predictive parameters:
+% *************************************************************************
+Nc      = 15;                           % MPC's control horizon length
+dU_lb   = [-6; -3];                     % lower bound for the accelerations
+dU_ub   = [6; 3];                       % upper bound for the accelerations
+
+optiMPC = casadi.Opti();                % Definde Casadi variable for building the MPC problem
+
+
+% Definition of the MPC's varibales and problem:
+qMPC    = optiMPC.variable(nq,Nc+1);    % This variables a re optimisation variables: the predictes trajectories
+u       = optiMPC.variable(nu,Nc);      % The controls: What we are goin to apply to the vehicle  
+qref    = optiMPC.parameter(nr);        % The reference for the controller: wehre we want to steer the vehicle
+qinit   = optiMPC.parameter(nq);        % intial condition
+u_last  = optiMPC.parameter(nu);        % Control applied in the las sampling time: used for constraint the acceleration of the first control in the sequnece
+
+% matrices for the quadratic stage-costs
+Wmpc    = diag([0.1 1 1]);              % Weight matrices: penalises deviation with respect to the reference
+Rmpc    = diag([0.01 0.05]);            % Penalise large values of the controls
+
+% *************************************************************************
+% MPC Objective function
+% *************************************************************************
+Jmpc = 0;
+for k=1:Nc+1
+    Jmpc = Jmpc + (qMPC([Nt+1,2*Nt+2:2*Nt+3],k)-qref).'* Wmpc *(qMPC([Nt+1,2*Nt+2:2*Nt+3],k)-qref);
+    if k < Nc+1
+        optiMPC.subject_to(qMPC(:,k+1) == F(qMPC(:,k),u(:,k),Nt,Ts,Lh1,L1,Lh2,L2));     % This is: q_{k+1}=f(q_k,u_k)
+        if k==1
+            optiMPC.subject_to( Ts.*dU_lb <= u(:,k)-u_last <= Ts.*dU_ub );              % Constraints on the accelerations
+        else
+            optiMPC.subject_to( Ts.*dU_lb <= u(:,k)-u(:,k-1) <= Ts.*dU_ub );            % Constraints on the accelerations
+        end        
+        %
+        Jmpc = Jmpc + u(:,k).'* Rmpc *u(:,k);                                           % Penalise large values of the controls
+    end
+end
+
+optiMPC.minimize(Jmpc);                                                     % What we are goin to minimise
+optiMPC.subject_to([-45*pi/180;-1] < u < [45*pi/180;1]);                    % restriccion velocidades angular y lineal
+optiMPC.subject_to(qMPC(:,1) == qinit);                                     % Set the first state as the inital state, which will be computed later by the MHE
+% Some parameters for the solver (do not care about that, for now...)
+p_optsMPC = struct('expand',true);
+s_optsMPC = struct('sb','yes','print_level',0,'gamma_theta',1e-2,'jacobian_approximation','exact','fast_step_computation','yes','warm_start_init_point','yes'); % 
+optiMPC.solver('ipopt',p_optsMPC,s_optsMPC);                                % MPC probelm is solved
+
+% *************************************************************************
+% Now, let's define the MHE
+% *************************************************************************
+Ne      = 5;                            % MHE's window's length
+
+optiMHE = casadi.Opti();                % casadi's optimisation problem variable
+qMHE    = optiMHE.variable(nq,Ne+1);    % Trajectory (of states) to be minimised
+yMHE    = optiMHE.parameter(ny,Ne+1);   % Measurements of the output of the system
+wMHE    = optiMHE.variable(nq,Ne);      % Estimation of the process disturbance variables
+vMHE    = optiMHE.variable(ny,Ne+1);    % Residuals of the estimation
+uPast   = optiMHE.parameter(nu,Ne);     % Past control inputs applied to the system
+X       = optiMHE.variable(nq);         % Arrival-cost
+xBar    = optiMHE.parameter(nq);        % Arrival-cost
+Pmhe    = eye(nq)*10;                      % Matrix for the arrival-cost
+Wmhe    = eye(nq)*10;                      % Matrix for weighin the process disturbance
+Rmhe    = eye(ny)*10;                      % Matrix for weighin the residuals of the estimation
+% *************************************************************************
+% This is the Objective function for the MHE problem:
+% *************************************************************************
+Jmhe = X.'*Pmhe*X; % ARRIVAL-COST
+optiMHE.subject_to(X == qMHE(:,1)-xBar);
+
+for i=1:Ne
+    Jmhe = Jmhe + (wMHE(:,i).'*Wmhe*wMHE(:,i)) + (vMHE(:,i).'*Rmhe*vMHE(:,i));
+    optiMHE.subject_to( qMHE(:,i+1) == F(qMHE(:,i),uPast(:,i),Nt,Ts,Lh1,L1,Lh2,L2) + wMHE(:,i) );
+    for j=1:Nt
+        optiMHE.subject_to( qMHE(j,i) == qMHE(Nt+j,i)-qMHE(Nt+1+j,i) );
+    end
+    optiMHE.subject_to( yMHE(:,i) == qMHE(indxOutput,i) + vMHE(:,i) ); 
+end
+optiMHE.subject_to( yMHE(:,Ne+1) == qMHE(indxOutput,Ne+1) + vMHE(:,Ne+1) );
+for j=1:Nt
+    optiMHE.subject_to( qMHE(j,Ne+1) == qMHE(Nt+j,Ne+1)-qMHE(Nt+1+j,Ne+1) );
+end
+Jmhe = Jmhe + vMHE(:,Ne+1).'*Rmhe*vMHE(:,Ne+1);
+% *************************************************************************
+optiMHE.minimize(Jmhe);                 % Minimise the OF
+% Some parameters for the solver (do not care about that, for now...)
+p_optsMHE = struct('expand',true);
+s_optsMHE = struct('sb','yes','print_level',0,'gamma_theta',1e-2,'jacobian_approximation','exact','fast_step_computation','yes','warm_start_init_point','yes'); % 
+optiMHE.solver('ipopt',p_optsMHE,s_optsMHE);
+
+% *************************************************************************
+% Define path to follow
+% *************************************************************************
+t           = 0:0.01:2*pi;
+x_path      = 10*cos(t);
+y_path      = 5.*sin(t);
+thetaref    = unwrap(atan2(diff(y_path),diff(x_path)));
+qr          = [[thetaref,thetaref(end)]; x_path; y_path];           % First reference. This reference need to be updated then in every sampling time
+% *************************************************************************
+
+optiMPC.set_value(u_last,[0;0]);                                % init this parameter of the MPC
+%
+
+q0          = gen_x0(Nt,[0;0;pi/2],qr(2:3,1),Lh1,L1,Lh2,L2);    % This function generates a feasible initila condition: The vehicle is a challenging one, 
+q0Bar       = q0 + 0.1.*randn(size(q0));                        % It simulates the initial uncertainiuy about the initial condition of the system, i.e., in real life, I do no knwon exactly the position, for example. Though I can,measure it, this measuremnt is affected by noise
+Q           = zeros(nq,length(t));
+Q(:,1)      = q0;
+Qr          = zeros(3,length(t));
+Qe          = zeros(3,length(t));
+Qestimated  = zeros(nq,length(t));
+u_mpc       = zeros(nu,length(t));
+u_kc        = zeros(nu,length(t));
+optiMPC.set_value(u_last,[0;0]);
+timesMPC    = zeros(1,length(t));
+timesMHE    = zeros(1,length(t));
+% *************************************************************************
+% Init MHE: 
+% *************************************************************************
+optiMHE.set_value(xBar,q0Bar);
+optiMHE.set_value(yMHE,repmat(q0Bar(indxOutput),1,Ne+1));
+optiMHE.set_value(uPast,repmat([0;0],1,Ne));
+solutionMHE = optiMHE.solve();
+
+% *************************************************************************
+% Finally, the simulation
+% *************************************************************************
+for i=1:length(qr)-1
+    % *********************************************************************
+    % First solve the MHE problem
+    % *********************************************************************
+    tic;
+    qTrajEstimated  = solutionMHE.value(qMHE);
+    yTrajEstimated  = solutionMHE.value(yMHE);
+    uTrajEstimated  = solutionMHE.value(uPast);
+    optiMHE.set_value(xBar,qTrajEstimated(:,2));
+    last_measurement = Q(indxOutput,i) + 0.1.*randn(ny,1);       % QUE PASA SI AGREGAMOS RUIDO A LAS MEDICIONES???!!!! SENSORES REALES NO SON PERFECTOS, Y POR MAS BUENOS QUE SEAN, SIEMPRE TIENEN ALGO DE RUIDO
+    optiMHE.set_value(yMHE,[yTrajEstimated(:,2:end),last_measurement]);
+    optiMHE.set_value(uPast,[uTrajEstimated(:,2:end),u_mpc(:,i)]);
+    solutionMHE = optiMHE.solve();
+    optiMHE.set_initial(solutionMHE.value_variables);
+    Qaux            = solutionMHE.value(qMHE);
+    Qestimated(:,i) = Qaux(:,end);
+    timesMHE(i)     = toc;
+    % *********************************************************************
+    % Once I solved the MHE, I feed the system state to the MPC
+    tic;
+    % *********************************************************************
+    % Now I can solve the MPC problem
+    % *********************************************************************
+    optiMPC.set_value(qref,qr(:,i));                        % Set the reference for the controller
+    optiMPC.set_value(qinit,Qestimated(:,i));                        % Set the initial condition for the controller, computed with the MHE
+    solutionMPC     = optiMPC.solve();                      % Solve the MPC problem
+    optiMPC.set_initial(solutionMPC.value_variables());     % This is just for the internal solver: set an numerial initial condition for next time to be solved
+    Qtraj           = solutionMPC.value(qMPC);              % Predicted trajectory
+    Utraj           = solutionMPC.value(u);
+    u_mpc(:,i+1)    = Utraj(:,1);
+    optiMPC.set_value(u_last,u_mpc(:,i+1));
+    timesMPC(i)     = toc;
+    % *********************************************************************
+    % Evolve the system: here the 'real system' is simulated
+    % *********************************************************************
+    Q(:,i+1) = F(Q(:,i),u_mpc(:,i+1),Nt,Ts,Lh1,L1,Lh2,L2);
+    % *********************************************************************    
+    % Do some nice pltos ;-)
+    plot_mono2(Qestimated(:,i),Qtraj,x_path,y_path,qr(2*Nt+2),qr(2*Nt+3),L1,L2);
+end
+% *************************************************************************
+
+figure; hold on; grid on;
+plot(qr(2,:),qr(3,:),'k', 'DisplayName','Reference Trajectory')
+plot(Qestimated(2*Nt+2,1:end-1),Qestimated(2*Nt+3,1:end-1),'g-.', 'DisplayName','Estimated Position 1')
+plot(Qestimated(2*Nt+4,1:end-1),Qestimated(2*Nt+5,1:end-1),'c-.', 'DisplayName','Estimated Position 2')
+plot(Qestimated(2*Nt+6,1:end-1),Q(2*Nt+7,1:end-1),'m-.', 'DisplayName','Estimated Position 3')
+plot(Q(2*Nt+2,:),Q(2*Nt+3,:),'y', 'DisplayName','Actual Position 1')
+plot(Q(2*Nt+4,:),Q(2*Nt+5,:),'b', 'DisplayName','Actual Position 2')
+plot(Q(2*Nt+6,:),Q(2*Nt+7,:),'r', 'DisplayName','Actual Position 3')
+daspect([1 1 1])
+legend('show')
+
+figure; hold on; grid on;
+plot(u_mpc(1,:),'g', 'DisplayName','MPC Control Input 1'); 
+plot(u_mpc(2,:),'b', 'DisplayName','MPC Control Input 2')
+plot(u_kc(1,:),'g-.', 'DisplayName','KC Control Input 1'); 
+plot(u_kc(2,:),'b-.', 'DisplayName','KC Control Input 2')
+legend('show')
+
+
+
+
+
+
+function Fk = F(q,u,Nt,Ts,Lh1,L1,Lh2,L2)
+    J1 = [-Lh1 * cos(q(1)) / L1, sin(q(1))/L1; Lh1*sin(q(1)), cos(q(1))];
+    J2 = [-Lh2 * cos(q(2)) / L2, sin(q(2))/L2; Lh2*sin(q(2)), cos(q(2))];      
+    
+    f_rhs  = [  [1 0] * (eye(2)-J1) * u;
+                [1 0] * (eye(2)-J2) * J1 * u;
+                %
+                [1 0] * u;
+                [1 0] * J1 * u;
+                [1 0] * J2 * J1 * u;
+                %
+                [0 cos(q(Nt+1))] * u;
+                [0 sin(q(Nt+1))] * u;
+                [0 cos(q(Nt+2))] * J1 * u;
+                [0 sin(q(Nt+2))] * J1 * u;
+                [0 cos(q(Nt+3))] * J2 * J1 * u;
+                [0 sin(q(Nt+3))] * J2 * J1 * u];
+    
+    
+    Fk = q + Ts.*f_rhs;
+end
+
+function x0 = gen_x0(Nt,x_y_theta,x_y_ref,Lh1,L1,Lh2,L2)
+    % DO NOT FORGET CHECKING FEASIBILITY OF INITIAL CONDITION!!!
+    if nargin == 1
+        Dx          = x_y_ref(1,2)-x_y_ref(1,1);
+        Dy          = x_y_ref(2,2)-x_y_ref(2,1);
+        theta0      = atan2(Dy,Dx);
+        thetas      = repmat(theta0,Nt+1,1);
+        xy_0        = x_y_ref(:,1);
+    else        
+        thetas      = [x_y_theta(3:end)'; repmat(x_y_theta(end),Nt+1-length(x_y_theta(3:end)),1)];
+        xy_0        = x_y_theta(1:2);%[xAux;yAux];
+    end
+    betas   = -diff(thetas);    
+    %
+    xy_1    = xy_0 - [Lh1*cos(thetas(1))+L1*cos(thetas(2)); Lh1*sin(thetas(1))+L1*sin(thetas(2))];
+    xy_N    = xy_1 - [Lh2*cos(thetas(2))+L2*cos(thetas(3)); Lh2*sin(thetas(2))+L2*sin(thetas(3))];
+    xy_0toN = [xy_0;xy_1;xy_N];
+    x0      = [ betas; thetas; xy_0toN];
+end
+
+function plot_mono2(qk, Qtraj, xpath, ypath, xref, yref, L1, L2)
+    % Colores y configuraciones visuales
+    clrPath = [0.7, 0.7, 0.7];
+    clrWheel = 'k';
+    clrAxe = 'k';
+    clrLongAxe = 'k';
+    clrTrailerLoad = 'b';
+    clrLastTrailerLoad = 'r';
+
+    % Coordenadas del camino y referencia
+    coordinates = [xpath; ypath];
+    Nt = 2;  % Número de remolques
+
+    % Dimensiones de los vehículos
+    XYtrailerAxe = [-0.67/2 0.67/2; 0 0];
+    XYtrailerWheelLeft = [-0.67/2 -0.67/2; 0.15/2 -0.15/2];
+    XYtrailerWheelRight = [0.67/2 0.67/2; -0.15/2 0.15/2];
+    XYtrailerLongAxe = [[0 0; 0 L1]; [0 0; 0 L2]];
+    XYtracWheelLeft = [-0.67/2 -0.67/2; 0.15/2 -0.15/2];
+    XYtracWheelRight = [0.67/2 0.67/2; -0.15/2 0.15/2];
+    XYtracAxe = [-0.67/2 0.67/2; 0 0];
+
+    % Ploteo del camino
+    plot(coordinates(1,:), coordinates(2,:), 'color', clrPath, 'LineWidth', 8); 
+    grid on; 
+    daspect([1 1 1]); 
+    hold on;
+
+    % Ploteo de la trayectoria prevista para cada segmento del N-trailer
+    for i = 1:Nt + 1
+        if i == 1
+            plot(Qtraj(2*Nt + 1 + (i - 1) * 2 + 1, :), Qtraj(2*Nt + 1 + i * 2, :), 'y', 'LineWidth', 4);
+        elseif i ~= Nt + 1
+            plot(Qtraj(2*Nt + 1 + (i - 1) * 2 + 1, :), Qtraj(2*Nt + 1 + i * 2, :), 'b', 'LineWidth', 4);
+        else
+            plot(Qtraj(2*Nt + 1 + (i - 1) * 2 + 1, :), Qtraj(2*Nt + 1 + i * 2, :), 'r', 'LineWidth', 4);
+        end
+    end
+
+    % Ploteo de la referencia
+    plot(xref, yref, 'k+', 'LineWidth', 2, 'MarkerSize', 10);
+    plot(xref, yref, 'ko', 'LineWidth', 2, 'MarkerSize', 10);
+
+    % Transformaciones del tractor y remolques
+    thetas = qk(Nt + 1:2 * Nt + 1);
+    xy0 = qk(2 * Nt + 2:2 * Nt + 3);
+    xyi = zeros(2, Nt + 1);
+    xyi(:, 1) = xy0;
+
+    % Ploteo del tractor
+    R0 = [cos(thetas(1) - pi/2), -sin(thetas(1) - pi/2); sin(thetas(1) - pi/2), cos(thetas(1) - pi/2)];
+    tractorWheelLeftPlt = R0 * XYtracWheelLeft + xyi(:, 1);
+    tractorWheelRightPlt = R0 * XYtracWheelRight + xyi(:, 1);
+    tractorAxePlt = R0 * XYtracAxe + xyi(:, 1);
+
+    line(tractorWheelLeftPlt(1, :), tractorWheelLeftPlt(2, :), 'color', clrWheel, 'linewidth', 4);
+    line(tractorWheelRightPlt(1, :), tractorWheelRightPlt(2, :), 'color', clrWheel, 'linewidth', 4);
+    line(tractorAxePlt(1, :), tractorAxePlt(2, :), 'color', clrAxe, 'linewidth', 2);
+
+    % Ploteo de los remolques
+    for i = 1:Nt
+        % Ajustar la posición del remolque basado en la orientación del remolque anterior
+        if i == 1
+            % Primer remolque sigue al líder
+            xyi(:, i + 1) = xyi(:, i) - L1 * [cos(thetas(i)); sin(thetas(i))];
+        else
+            % Siguientes remolques siguen al remolque anterior
+            xyi(:, i + 1) = xyi(:, i) - L2 * [cos(thetas(i)); sin(thetas(i))];
+        end
+
+        % La posición de la conexión es fija, solo rota
+        theta_i_plus1 = thetas(i + 1);
+        R = [cos(theta_i_plus1 - pi/2), -sin(theta_i_plus1 - pi/2); 
+             sin(theta_i_plus1 - pi/2),  cos(theta_i_plus1 - pi/2)];
+
+        % Cálculo de las posiciones de las partes del remolque
+        trailerAxePlt = R * XYtrailerAxe + xyi(:, i + 1);
+        trailerWheelLeftPlt = R * XYtrailerWheelLeft + xyi(:, i + 1);
+        trailerWheelRightPlt = R * XYtrailerWheelRight + xyi(:, i + 1);
+        trailerLongAxePlt = R * XYtrailerLongAxe((i - 1) * 2 + 1:i * 2, :) + xyi(:, i + 1);
+
+        % Ploteo de las partes del remolque
+        hold on;
+
+        line(trailerAxePlt(1, :), trailerAxePlt(2, :), 'color', clrAxe, 'linewidth', 2);
+        line(trailerWheelLeftPlt(1, :), trailerWheelLeftPlt(2, :), 'color', clrWheel, 'linewidth', 4);
+        line(trailerWheelRightPlt(1, :), trailerWheelRightPlt(2, :), 'color', clrWheel, 'linewidth', 4);
+        line(trailerLongAxePlt(1, :), trailerLongAxePlt(2, :), 'color', clrLongAxe, 'linewidth', 2);
+
+        % Ploteo del punto de conexión
+        plot(trailerLongAxePlt(1, 2), trailerLongAxePlt(2, 2), 'ro', 'MarkerSize', 5, 'MarkerFaceColor', 'r');
+    end
+
+    hold off;
+
+    % Ajustes finales del gráfico
+    xlim([min(coordinates(1, :)) - 2, max(coordinates(1, :)) + 2]);
+    ylim([min(coordinates(2, :)) - 4, max(coordinates(2, :)) + 4]);
+
+    drawnow limitrate;
+end
+
+
+
+
+
+function circles(x_center, y_center, radius, varargin)
+    % Genera puntos alrededor de un círculo
+    theta = linspace(0, 2*pi, 100);
+    x = x_center + radius * cos(theta);
+    y = y_center + radius * sin(theta);
+
+    % Parsea argumentos adicionales para propiedades de estilo
+    p = inputParser;
+    addParameter(p, 'edgecolor', 'k', @(x) true); % Color por defecto: negro
+    addParameter(p, 'facecolor', 'none', @(x) true); % Sin relleno por defecto
+    parse(p, varargin{:});
+
+    % Dibuja el círculo
+    plot(x, y, 'Color', p.Results.edgecolor, 'LineWidth', 1.5);
+    hold on;
+    if ~strcmp(p.Results.facecolor, 'none')
+        fill(x, y, p.Results.facecolor);
+    end
+    hold off;
+
+    % Asegura que los ejes tengan la misma escala
+    axis equal;
+end
