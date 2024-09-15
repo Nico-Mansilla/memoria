@@ -57,8 +57,8 @@ qinit = optiMPC.parameter(nq);      % Initial state
 u_last = optiMPC.parameter(nu);     % Last control input
 
 % Cost matrices
-Wmpc = diag([1 1 0.1]);    % State cost weight matrix
-Rmpc = diag([1*0.001 1*0.001]);  % Control input cost weight matrix
+Wmpc = diag([1 1 0.01]);    % State cost weight matrix
+Rmpc = diag([0.01 0.01]);  % Control input cost weight matrix
 
 % *************************************************************************
 % MPC Objective Function
@@ -72,11 +72,20 @@ for k = 1:Nc+1
         %acceleration constraints
         if k ~= 1
             optiMPC.subject_to((dU_lb <= (u(:,k) - u(:,k-1))/Ts) <= dU_ub);
+        
+        else    
+            optiMPC.subject_to((dU_lb <= (u(:,k) - u_last)/Ts) <= dU_ub);
         end
         optiMPC.subject_to((U_lb <= u(:,k)) <= U_ub);
         Jmpc = Jmpc + u(:,k).' * Rmpc * u(:,k);
     end
 end
+%fordward movement constraint
+optiMPC.subject_to(u(1,:)*0.5 + u(2,:)*0.5 >= 0);
+
+%seek minimum action to avoid oscillations
+optiMPC.minimize(sum(sum(u.^2)));
+
 
 % Set objective
 optiMPC.minimize(Jmpc);
@@ -92,7 +101,7 @@ optiMPC.solver('ipopt', p_optsMPC, s_optsMPC);
 % *************************************************************************
 % Moving Horizon Estimation (MHE) Parameters:
 % *************************************************************************
-Nh = 10;  % MHE horizon length
+Nh = 20;  % MHE horizon length
 optiMHE = casadi.Opti();
 
 qMHE = optiMHE.variable(nq, Nh+1);  % State estimates
@@ -114,8 +123,8 @@ xBar    = optiMHE.parameter(nq);        % Initial state for MHE
 
 % Cost matrices for MHE
 Rmhe = diag([gps_noise_factor gps_noise_factor gyro_noise_factor]); %q pert
-Qmhe = diag([1 1 1]*100); % measure pert
-Pmhe = diag([gps_noise_factor gps_noise_factor 100]); %arribal cost
+Qmhe = diag([1 1 0.001]*10); % measure pert
+Pmhe = diag([gps_noise_factor gps_noise_factor 0.001]); %arribal cost
 
 % *************************************************************************
 % MHE Objective Function
@@ -189,6 +198,46 @@ y_path      = a * sin(t) .* cos(t) ./ (1 + sin(t).^2);
 thetaref    = unwrap(atan2(diff(y_path), diff(x_path)));
 qr          = [x_path; y_path; [thetaref, thetaref(end)]]; % First reference. This reference needs to be updated then in every sampling time
 % *************************************************************************
+% Square Path
+side_length = 5; % Length of each side of the square
+num_points = length(t); % Number of points based on t
+
+% Define the four corners of the square centered at (0,0)
+half_side = side_length / 2;
+x_corners = [-half_side, half_side, half_side, -half_side, -half_side];
+y_corners = [-half_side, -half_side, half_side, half_side, -half_side];
+
+% Interpolate points along each side
+x_path = [];
+y_path = [];
+points_per_side = num_points / 4;
+for i = 1:length(x_corners)-1
+    x_path = [x_path, linspace(x_corners(i), x_corners(i+1), points_per_side)];
+    y_path = [y_path, linspace(y_corners(i), y_corners(i+1), points_per_side)];
+end
+
+% Calculate the reference orientation (thetaref)
+thetaref = unwrap(atan2(diff(y_path), diff(x_path)));
+
+% Ensure the difference between angles is not greater than 2*pi
+%buscar todos los valores de thetaref sin repetir
+angles_qr = unique(thetaref,'stable');
+for i = 2:length(angles_qr)
+    if angles_qr(i) - angles_qr(i-1) > 2*pi
+        angles_qr(i) = angles_qr(i) + 2*pi;
+    elseif angles_qr(i) - angles_qr(i-1) < -2*pi
+        angles_qr(i) = angles_qr(i) - 2*pi;
+    end
+end
+
+% reemplzar los valores dfierentes de thetaref por los valores sin repetir
+for i = 1:4
+    thetaref(thetaref == angles_qr(i)) = angles_qr(i);
+end
+
+qr = [x_path; y_path; [thetaref, thetaref(end)]]; % First reference. This reference needs to be updated then in every sampling time
+
+% *************************************************************************
 
 optiMPC.set_value(u_last,[0;0]);                                % init this parameter of the MPC
 %
@@ -238,7 +287,7 @@ Qlpf_estimated = zeros(nq, length(t)); % Estimated states by LPF
 
 % Simulation loop
 
-elapsed_time = zeros(1,2);
+elapsed_time = zeros(1,length(qr));
 
 % Inicializar la figura y las leyendas
 figure(1);
@@ -253,6 +302,9 @@ h1 = plot(NaN, NaN, 'k', 'DisplayName', 'Reference Trajectory', 'LineWidth', 1.5
 h2 = plot(NaN, NaN, 'b', 'DisplayName', 'Actual Position', 'LineWidth', 1.5);
 h3 = plot(NaN, NaN, 'r--', 'DisplayName', 'Estimated Position', 'LineWidth', 1.5);
 h4 = plot(NaN, NaN, 'g.', 'DisplayName', 'Mean Gps', 'LineWidth',1.5); 
+
+% Inicializar el identificador del triángulo
+h_triangle = [];
 
 legend([h1, h2, h3, h4]);
 
@@ -302,7 +354,7 @@ for i = 1:length(qr)
         end
         
         %measure time of execution
-        elapsed_time(1,2) = toc;
+        elapsed_time(i) = toc;
 
         % Evolve system
         
@@ -310,9 +362,8 @@ for i = 1:length(qr)
     end
 
     %measure time of execution
-    disp('Max elapsed time in seconds');
-    disp(max(elapsed_time(:)));
-    elapsed_time(1,1) = max(elapsed_time(:));
+    disp('Max elapsed time');
+    disp((elapsed_time(i)));
     
     % Limpiar el gráfico y volver a dibujar las líneas
     cla;
@@ -320,10 +371,29 @@ for i = 1:length(qr)
     plot(Q(1,1:i), Q(2,1:i), 'b', 'DisplayName', 'Actual Position', 'LineWidth',1.5);   % Actual Position
     plot(Qestimated(1,1:i), Qestimated(2,1:i), 'r--', 'DisplayName', 'MHE Position', 'LineWidth',1.5); % Estimated Position
     plot(Qlpf_estimated(1,1:i), Qlpf_estimated(2,1:i), 'g.', 'DisplayName', 'Mean LPF Position', 'LineWidth',1.5); % Estimated Position
-    %plot gps position
-    %plot(last_gps(1,:),last_gps(2,:),'ko', 'DisplayName', 'GPS position');
+    
     %plot gps measurements
     plot(last_measurement(1:2:end-1),last_measurement(2:2:end-1),'ro', 'DisplayName', 'GPS noisy measurements');
+
+
+    % Eliminar el triángulo anterior si existe
+    if ~isempty(h_triangle)
+        delete(h_triangle);
+    end
+    % Dibujar la cabeza de la flecha como un triángulo isósceles azul sin bordes
+    head_width = 0.3; % Ancho de la cabeza de la flecha
+    head_length = head_width; % Longitud de la cabeza de la flecha
+    theta = Q(3,i); % Orientación del vehículo
+
+    % Coordenadas del triángulo en el sistema de referencia del vehículo
+    x_triangle = [0, -head_length, -head_length];
+    y_triangle = [0, head_width/2, -head_width/2];
+
+    % Rotar y trasladar el triángulo a la posición y orientación del vehículo
+    R = [cos(theta), -sin(theta); sin(theta), cos(theta)];
+    triangle = R * [x_triangle + head_length * 0.5; y_triangle];
+    h_triangle = fill(Q(1,i) + triangle(1,:), Q(2,i) + triangle(2,:), 'b', 'EdgeColor', 'none', 'HandleVisibility', 'off');
+
     drawnow;
 end
 
@@ -360,6 +430,17 @@ legend('show');
 title('Error in Direction');
 xlabel('Time Step');
 ylabel('Error Direction');
+
+%plot time of execution
+figure(4); hold on; grid on;
+plot( elapsed_time, 'b', 'DisplayName', 'Elapsed time by iteration');
+legend('show');
+title('Elapsed time by iteration');
+xlabel('Iteration');
+ylabel('Elapsed time in seconds');
+
+
+
 
 %display rms error
 disp('RMS error in position vs mean')
