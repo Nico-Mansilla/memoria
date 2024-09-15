@@ -92,7 +92,7 @@ optiMPC.solver('ipopt', p_optsMPC, s_optsMPC);
 % *************************************************************************
 % Moving Horizon Estimation (MHE) Parameters:
 % *************************************************************************
-Nh = 10;  % MHE horizon length
+Nh = 20;  % MHE horizon length
 optiMHE = casadi.Opti();
 
 qMHE = optiMHE.variable(nq, Nh+1);  % State estimates
@@ -302,7 +302,7 @@ for i = 1:length(qr)
         end
         
         %measure time of execution
-        elapsed_time(1,2) = toc;
+        elapsed_time(i) = toc;
 
         % Evolve system
         
@@ -312,7 +312,6 @@ for i = 1:length(qr)
     %measure time of execution
     disp('Max elapsed time in seconds');
     disp(max(elapsed_time(:)));
-    elapsed_time(1,1) = max(elapsed_time(:));
     
     % Limpiar el gráfico y volver a dibujar las líneas
     cla;
@@ -360,6 +359,15 @@ legend('show');
 title('Error in Direction');
 xlabel('Time Step');
 ylabel('Error Direction');
+
+%plot time of execution
+figure(4); hold on; grid on;
+plot( elapsed_time, 'b', 'DisplayName', 'Elapsed time by iteration');
+legend('show');
+title('Elapsed time by iteration');
+xlabel('Iteration');
+ylabel('Elapsed time in seconds');
+
 
 %display rms error
 disp('RMS error in position vs mean')
