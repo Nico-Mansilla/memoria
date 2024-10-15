@@ -7,14 +7,14 @@ clearvars
 close all
 clc
 
-addpath('C:\Users\nicolas\Desktop\Memoria\casadi-3.6.5-windows64-matlab2018b')
+addpath(fullfile(pwd, 'casadi-3.6.5-windows64-matlab2018b'))
 import casadi.*
 
 % *************************************************************************
 % General Parameters:
 % *************************************************************************
 Ts = 0.100;  % Sampling time
-gps_noise_factor=0.1; % Noise factor
+gps_noise_factor=0.1*5; % Noise factor
 gyro_noise_factor = 2*pi*0.005; % Noise factor
 
 % *************************************************************************
@@ -57,8 +57,8 @@ qinit = optiMPC.parameter(nq);      % Initial state
 u_last = optiMPC.parameter(nu);     % Last control input
 
 % Cost matrices
-Wmpc = diag([1 1 0.01]);    % State cost weight matrix
-Rmpc = diag([0.01 0.01]);  % Control input cost weight matrix
+Wmpc = diag([1 1 0.01]*2);    % State cost weight matrix
+Rmpc = diag([0.08 0.08]);  % Control input cost weight matrix
 
 % *************************************************************************
 % MPC Objective Function
@@ -101,7 +101,7 @@ optiMPC.solver('ipopt', p_optsMPC, s_optsMPC);
 % *************************************************************************
 % Moving Horizon Estimation (MHE) Parameters:
 % *************************************************************************
-Nh = 20;  % MHE horizon length
+Nh = 80;  % MHE horizon length
 optiMHE = casadi.Opti();
 
 qMHE = optiMHE.variable(nq, Nh+1);  % State estimates
@@ -112,6 +112,7 @@ slackGps1 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
 slackGps2 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
 slackGps3 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
 slackGps4 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
+slackmeanGPS = optiMHE.variable(nq, Nh+1); % Slack variable for mean GPS measurements
 
 
 y_meas = optiMHE.parameter(4*2+1, Nh+1);     % Measurements
@@ -122,8 +123,8 @@ X       = optiMHE.variable(nq);         % Arrival-cost
 xBar    = optiMHE.parameter(nq);        % Initial state for MHE
 
 % Cost matrices for MHE
-Rmhe = diag([gps_noise_factor gps_noise_factor gyro_noise_factor]); %q pert
-Qmhe = diag([1 1 0.001]*10); % measure pert
+Rmhe = diag([gps_noise_factor gps_noise_factor 0.001]*2); %measure cost
+Qmhe = diag([1 1 100]*0.01); % q model cost
 Pmhe = diag([gps_noise_factor gps_noise_factor 0.001]); %arribal cost
 
 % *************************************************************************
@@ -149,17 +150,22 @@ for k = 1:Nh
     optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(3:4,k);y_meas(4*2+1,k)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,k)); 
     optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(5:6,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,k));
     optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(7:8,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,k));
+    %GPS mean 
+    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [mean([y_meas(1:2,k),y_meas(3:4,k),y_meas(5:6,k),y_meas(7:8,k)],2);y_meas(4*2+1,k)] + mean([slackGps1(:,k),slackGps2(:,k),slackGps3(:,k),slackGps4(:,k)],2) + slackmeanGPS(:,k));
 end
 
 % Rotation matrix
 R = [cos(y_meas(4*2+1,Nh+1)), -sin(y_meas(4*2+1,Nh+1)), 0;
      sin(y_meas(4*2+1,Nh+1)),  cos(y_meas(4*2+1,Nh+1)), 0;
                            0,                        0, 0]; 
-
+%slack variables for GPS measurements
 optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(1:2,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,Nh+1));
 optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(3:4,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,Nh+1)); 
 optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(5:6,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,Nh+1));
 optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(7:8,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,Nh+1));
+
+%slack variable for mean GPS measurements
+optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [mean([y_meas(1:2,Nh+1),y_meas(3:4,Nh+1),y_meas(5:6,Nh+1),y_meas(7:8,Nh+1)],2);y_meas(4*2+1,Nh+1)] + mean([slackGps1(:,Nh+1),slackGps2(:,Nh+1),slackGps3(:,Nh+1),slackGps4(:,Nh+1)],2) + slackmeanGPS(:,Nh+1));
 
 Jmhe = Jmhe + vMHE(:,Nh+1).'*Rmhe*vMHE(:,Nh+1);%+ wMHE(:,Nh+1).'*Qmhe*wMHE(:,Nh+1);
 
@@ -169,8 +175,8 @@ optiMHE.minimize(Jmhe);
 
 
 % Bounds on process and measurement noise
-optiMHE.subject_to((-0.4 <= wMHE) <= 0.4);
-optiMHE.subject_to((-0.4 <= vMHE) <= 0.4);
+optiMHE.subject_to((-0.4*5 <= wMHE) <= 0.4*5);
+optiMHE.subject_to((-0.4*5 <= vMHE) <= 0.4*5);
 
 % *************************************************************************
 
@@ -223,19 +229,21 @@ thetaref = unwrap(atan2(diff(y_path), diff(x_path)));
 %buscar todos los valores de thetaref sin repetir
 angles_qr = unique(thetaref,'stable');
 for i = 2:length(angles_qr)
-    if angles_qr(i) - angles_qr(i-1) > 2*pi
-        angles_qr(i) = angles_qr(i) + 2*pi;
-    elseif angles_qr(i) - angles_qr(i-1) < -2*pi
+    if angles_qr(i) - angles_qr(i-1) > pi
         angles_qr(i) = angles_qr(i) - 2*pi;
+    elseif angles_qr(i) - angles_qr(i-1) < -pi
+        angles_qr(i) = angles_qr(i) + 2*pi;
     end
 end
 
 % reemplzar los valores dfierentes de thetaref por los valores sin repetir
 for i = 1:4
-    thetaref(thetaref == angles_qr(i)) = angles_qr(i);
+    if thetaref((1+round(length(thetaref)/4)*(i-1)):(round(length(thetaref)/4)*i)-1) ~= angles_qr(i)
+        thetaref((1+round(length(thetaref)/4)*(i-1)):(round(length(thetaref)/4)*i)-1) = angles_qr(i);
+    end
 end
 
-qr = [x_path; y_path; [thetaref, thetaref(end)]]; % First reference. This reference needs to be updated then in every sampling time
+%qr = [x_path; y_path; [thetaref, thetaref(end)]]; % First reference. This reference needs to be updated then in every sampling time
 
 % *************************************************************************
 
@@ -243,9 +251,9 @@ optiMPC.set_value(u_last,[0;0]);                                % init this para
 %
 
 q0          = [-2,1,1];    % This function generates a feasible initila condition: The vehicle is a challenging one
-R = [cos(q0(3)), -sin(q0(3)); sin(q0(3)), cos(q0(3))];
-gps0_        = R*0.5*[lg lg -lg -lg ; -wg wg wg -wg] + repmat(q0(1:2)',1,4); % GPS measurements
-gps0Bar        = [gps0_(:)+ gps_noise_factor.*randn(size(gps0_(:))) ; q0(3)+gyro_noise_factor.*randn(1)]; %first measure
+R           = [cos(q0(3)), -sin(q0(3)); sin(q0(3)), cos(q0(3))];
+gps0_       = R*0.5*[lg lg -lg -lg ; -wg wg wg -wg] + repmat(q0(1:2)',1,4); % GPS measurements
+gps0Bar     = [gps0_(:)+ gps_noise_factor.*randn(size(gps0_(:))) ; q0(3)+gyro_noise_factor.*randn(1)]; %first measure
 
 %q0Bar       = q0 + noise_factor.*randn(size(q0));  %first measure 
 %gps0Bar     = gps0 + gps_noise_factor.*randn(size(gps0)); %first measure
@@ -279,7 +287,7 @@ solutionMHE = optiMHE.solve();
 % *************************************************
 % LPF Initialization
 % ***********************************************
-LPF_size = 8; % Size of the LPF
+LPF_size = 20; % Size of the LPF
 LPF_buff = repmat(gps0Bar_mean, 1, LPF_size); % Buffer for the LPF
 Qlpf_estimated = zeros(nq, length(t)); % Estimated states by LPF
 
