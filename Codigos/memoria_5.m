@@ -298,7 +298,7 @@ solutionMHE = optiMHE.solve();
 % *************************************************
 % LPF Initialization
 % ***********************************************
-LPF_size = 20; % Size of the LPF
+LPF_size = 18; % Size of the LPF
 LPF_buff = repmat(gps0Bar_mean, 1, LPF_size); % Buffer for the LPF
 Qlpf_estimated = zeros(nq, length(t)); % Estimated states by LPF
 
@@ -321,11 +321,28 @@ h1 = plot(NaN, NaN, 'k', 'DisplayName', 'Reference Trajectory', 'LineWidth', 1.5
 h2 = plot(NaN, NaN, 'b', 'DisplayName', 'Actual Position', 'LineWidth', 1.5);
 h3 = plot(NaN, NaN, 'r--', 'DisplayName', 'Estimated Position', 'LineWidth', 1.5);
 h4 = plot(NaN, NaN, 'g.', 'DisplayName', 'Mean Gps', 'LineWidth',1.5); 
+h5 = plot(NaN, NaN, 'm.', 'DisplayName', 'Kalmam Filter', 'LineWidth',1.5);
 
 % Inicializar el identificador del triángulo
 h_triangle = [];
 
-legend([h1, h2, h3, h4]);
+legend([h1, h2, h3, h4,h5]);
+
+%Inicializar filtro de Kalman   
+% Definir las matrices del filtro de Kalman
+A = eye(3); % Matriz de transición del estado
+B = Ts * eye(3); % Matriz de control
+H = eye(3); % Matriz de observación
+Qk = 0.1 * eye(3); % Covarianza del ruido del proceso
+Rk = [gps_noise_factor 0 0; 0 gps_noise_factor 0; 0 0 gyro_noise_factor]*0.5; % Covarianza del ruido de la medición
+
+% Inicializar el estado y la covarianza del filtro de Kalman
+x_kalman = Q(:, 1); % Estado inicial
+P_kalman = eye(3); % Covarianza inicial
+
+% Inicializar Qkalman
+Qkalman = zeros(size(Q));
+
 
 for i = 1:length(qr)
     %measure time of execution
@@ -377,12 +394,26 @@ for i = 1:length(qr)
 
         % Evolve system
         
-        if i == round(length(qr)/4)
-        %    Q(:, i) = Q(:, i) + [-1 ; 3 ; pi]; % Evolve system
+        if i == round(length(qr)/3)
+            Q(:, i) = Q(:, i) + [-1 ; 3 ; pi]; % Evolve system
         end
         Q(:, i+1) = F(Q(:, i), u_mpc(:, i), Ts, w, zeros(3,1)); %+ [1.*randn(2,1);0.1.*randn(1)]; % Evolve system
         
     end
+
+    % Filtro de Kalman
+    % Predicción
+    x_kalman = A * x_kalman + B * [u_mpc(:, i); 0]; % Asegúrate de que las dimensiones coincidan
+    P_kalman = A * P_kalman * A' + Qk;
+
+    % Actualización
+    K = P_kalman * H' / (H * P_kalman * H' + Rk);
+    x_kalman = x_kalman + K * (Qmean(:, i) - H * x_kalman);
+    P_kalman = (eye(3) - K * H) * P_kalman;
+
+    % Guardar el estado estimado por el filtro de Kalman
+    Qkalman(:, i) = x_kalman;
+
 
     %measure time of execution
     disp('Max elapsed time');
@@ -394,6 +425,7 @@ for i = 1:length(qr)
     plot(Q(1,1:i), Q(2,1:i), 'b', 'DisplayName', 'Actual Position', 'LineWidth',1.5);   % Actual Position
     plot(Qestimated(1,1:i), Qestimated(2,1:i), 'r--', 'DisplayName', 'MHE Position', 'LineWidth',1.5); % Estimated Position
     plot(Qlpf_estimated(1,1:i), Qlpf_estimated(2,1:i), 'g.', 'DisplayName', 'Mean LPF Position', 'LineWidth',1.5); % Estimated Position
+    plot(Qkalman(1, 1:i), Qkalman(2, 1:i), 'm.', 'DisplayName', 'Kalman Filter Position', 'LineWidth', 1.5); % Estimated Position
     
     %plot gps measurements
     plot(last_measurement(1:2:end-1),last_measurement(2:2:end-1),'ro', 'DisplayName', 'GPS noisy measurements');
@@ -438,7 +470,8 @@ figure(3);
 subplot(1, 2, 1);
 hold on; grid on;
 plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error');
-plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF'); 
+plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF');
+plot(t, sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2), 'm', 'DisplayName', 'Norm position error Kalman Filter'); 
 legend('show');
 title('Norm Position Error');
 xlabel('Time Step');
@@ -449,6 +482,7 @@ subplot(1, 2, 2);
 hold on; grid on;
 plot(t, abs(Qestimated(3,:) - Q(3,:)), 'r', 'DisplayName', 'Error dir MHE');
 plot(t, abs(Qlpf_estimated(3,:) - Q(3,:)), 'g', 'DisplayName', 'Error dir Mean LPF');
+plot(t, abs(Qkalman(3,:) - Q(3,:)), 'm', 'DisplayName', 'Error dir Kalman Filter');
 legend('show');
 title('Error in Direction');
 xlabel('Time Step');
@@ -469,6 +503,10 @@ figure(5);
 subplot(1, 2, 1);
 hold on; grid on;
 plot(sqrt((Q(1,:)-qr(1,:)).^2 + (Q(2,:)-qr(2,:)).^2), 'b', 'DisplayName', 'Norm position error Q');
+legend('show');
+title('Norm Position Error vs Reference');
+xlabel('Time Step');
+ylabel('Norm Position Error');
 
 subplot(1, 2, 2);
 hold on; grid on;
@@ -484,14 +522,14 @@ ylabel('Norm Position Error');
 
 
 %display rms error
-disp('RMS error in position vs mean')
-disp(rms(sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2)) - rms(sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2)));
+disp('RMS error in position vs kalman')
+disp(rms(sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2)) - rms(sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2)));
 
-disp('RMS error in direction vs mean')
-disp(rms(abs(Qlpf_estimated(3,:) - Q(3,:))) - rms(abs(Qestimated(3,:) - Q(3,:)))); 
+disp('RMS error in direction vs kalman')
+disp(rms(abs(Qkalman(3,:) - Q(3,:))) - rms(abs(Qestimated(3,:) - Q(3,:)))); 
 
-disp('Max error in position estimated perccentage compared to noise')
-disp(max(sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2)) / gps_noise_factor);
+disp('Max error in position estimated percentage compared to noise')
+disp(max(sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2)) / gps_noise_factor);
 
 
 % Dynamics function
@@ -499,7 +537,7 @@ function Fk = F(q, u, Ts, w, noise)
 
     Fk = q + Ts * [cos(q(3)), 0; 
                    sin(q(3)), 0; 
-                   0, 1] *[1/2 1/2; 1/w -1/w]* u + noise;
+                           0, 1] *[1/2 1/2; 1/w -1/w]* u + noise;
 end
 
 
