@@ -14,8 +14,11 @@ import casadi.*
 % General Parameters:
 % *************************************************************************
 Ts = 0.100;  % Sampling time
-gps_noise_factor=0.1*5; % Noise factor
-gyro_noise_factor = 2*pi*0.005; % Noise factor
+gps_noise_factor=0.1*5; % Noise factor standard deviation
+gps_noise_factor_variance = gps_noise_factor^2; % Noise factor variance
+
+gyro_noise_factor = 2*pi*0.005; % Noise factor standard deviation
+gyro_noise_factor_variance = gyro_noise_factor^2; % Noise factor variance
 
 % *************************************************************************
 % Vehicle's Geometrical Properties:
@@ -57,7 +60,7 @@ qinit = optiMPC.parameter(nq);      % Initial state
 u_last = optiMPC.parameter(nu);     % Last control input
 
 % Cost matrices
-Wmpc = diag([1 1 0.8]*2);    % State cost weight matrix
+Wmpc = diag([1 1 2]*2);    % State cost weight matrix
 Rmpc = diag([0.08 0.08]);  % Control input cost weight matrix
 
 % *************************************************************************
@@ -326,116 +329,128 @@ h5 = plot(NaN, NaN, 'm.', 'DisplayName', 'Kalmam Filter', 'LineWidth',1.5);
 % Inicializar el identificador del triángulo
 h_triangle = [];
 
-legend([h1, h2, h3, h4,h5]);
+legend([h1, h2, h3,h5]);
 
-%Inicializar filtro de Kalman   
-% Definir las matrices del filtro de Kalman
-A = eye(3); % Matriz de transición del estado
-B = Ts * eye(3); % Matriz de control
-H = eye(3); % Matriz de observación
-Qk = 0.1 * eye(3); % Covarianza del ruido del proceso
-Rk = [gps_noise_factor 0 0; 0 gps_noise_factor 0; 0 0 gyro_noise_factor]*0.5; % Covarianza del ruido de la medición
+%Inicializar filtro de Kalman extendido (EKF)
+% Definir las matrices del ruido del proceso y de la medición
+Qk = 0.01 * eye(3); % Covarianza del ruido del proceso
+Rk = diag([gps_noise_factor, gps_noise_factor, gyro_noise_factor]) * 0.5; % Covarianza del ruido de la medición
 
-% Inicializar el estado y la covarianza del filtro de Kalman
-x_kalman = Q(:, 1); % Estado inicial
-P_kalman = eye(3); % Covarianza inicial
+% Inicializar el estado y la covarianza del filtro EKF
+x_kalman = gps0Bar_mean; % Estado inicial
+P_kalman = Rk; % Covarianza inicial
 
 % Inicializar Qkalman
 Qkalman = zeros(size(Q));
 
 
 for i = 1:length(qr)
-    %measure time of execution
+    % Medir tiempo de ejecución
     tic
     % MHE 
-    % Update MHE
-    qTrajEstimated  = solutionMHE.value(qMHE); % Get estimated state
-    yTrajEstimated  = solutionMHE.value(y_meas); % Get estimated measurements
-    uTrajEstimated  = solutionMHE.value(uPast); % Get estimated control inputs
+    % Actualizar MHE
+    qTrajEstimated  = solutionMHE.value(qMHE); % Obtener estado estimado
+    yTrajEstimated  = solutionMHE.value(y_meas); % Obtener mediciones estimadas
+    uTrajEstimated  = solutionMHE.value(uPast); % Obtener entradas de control estimadas
 
-    optiMHE.set_value(xBar,qTrajEstimated(:,2)); % Set initial state
+    optiMHE.set_value(xBar,qTrajEstimated(:,2)); % Establecer estado inicial
 
+    % Mediciones GPS
+    last_gps = repmat(Q(1:2,i), 1, 4) + [cos(Q(3,i)), -sin(Q(3,i)); sin(Q(3,i)), cos(Q(3,i))] * 0.5 * [lg lg -lg -lg; -wg wg wg -wg]; % Mediciones GPS
+    last_measurement = [last_gps(:) + gps_noise_factor .* randn(size(last_gps(:))); Q(3,i) + gyro_noise_factor .* randn(1)]; % Mediciones GPS y giroscopio con ruido
+    Qmean(:,i) = [mean(last_measurement(1:2:end-1)); mean(last_measurement(2:2:end-1)); last_measurement(end)]; % Media de las mediciones GPS
 
-    %GPS measurements
-    last_gps = repmat(Q(1:2,i), 1, 4) + [cos(Q(3,i)), -sin(Q(3,i)); sin(Q(3,i)), cos(Q(3,i))]*0.5*[lg lg -lg -lg ; -wg wg wg -wg]; % GPS measurements
-    last_measurement = [last_gps(:) + gps_noise_factor.*randn(size(last_gps(:)));Q(3,i)+gyro_noise_factor.*randn(1)]; % GPS and gyro measurements + noise
-    Qmean(:,i) = [mean(last_measurement(1:2:end-1)); mean(last_measurement(2:2:end-1)); last_measurement(end)]; % Mean of the GPS measurements
+    % Actualizar MHE
+    optiMHE.set_value(y_meas,[yTrajEstimated(:,2:end), last_measurement]); % Establecer mediciones
+    optiMHE.set_value(uPast,[uTrajEstimated(:,2:end), u_mpc(:,i)]); % Establecer entradas de control pasadas
+    solutionMHE = optiMHE.solve();  % Resolver MHE
+    optiMHE.set_initial(solutionMHE.value_variables); % Actualizar condición inicial
+    Qaux            = solutionMHE.value(qMHE); % Obtener estado estimado
+    Qestimated(:,i) = Qaux(:,end); % Obtener estado estimado final
 
-    %MHE update
-    optiMHE.set_value(y_meas,[yTrajEstimated(:,2:end),last_measurement]); % Set measurement
-    optiMHE.set_value(uPast,[uTrajEstimated(:,2:end),u_mpc(:,i)]); % Set past control inputs
-    solutionMHE = optiMHE.solve();  % Solve MHE
-    optiMHE.set_initial(solutionMHE.value_variables); % Update initial condition
-    Qaux            = solutionMHE.value(qMHE); % Get estimated state
-    Qestimated(:,i) = Qaux(:,end); % Get estimated state
-
-    %lpf update
+    % Actualizar LPF
     LPF_buff = [LPF_buff(:,2:end), Qmean(:,i)];
     Qlpf_estimated(:,i) = mean(LPF_buff, 2);
 
-
-
     if i < length(qr)
         % MPC
-        optiMPC.set_value(qref, qr(:, i));  % Set reference
-        optiMPC.set_value(qinit, Qestimated(:, i));  % Set initial state
+        optiMPC.set_value(qref, qr(:, i));  % Establecer referencia
+        optiMPC.set_value(qinit, Qestimated(:, i));  % Establecer estado inicial
         try
-            solutionMPC = optiMPC.solve();  % Solve MPC
-            optiMPC.set_initial(solutionMPC.value_variables());  % Update initial condition
-            u_mpc(:, i+1) = solutionMPC.value(u(:, 1));  % Get control input
-            optiMPC.set_value(u_last, u_mpc(:, i+1));  % Update last control input
+            solutionMPC = optiMPC.solve();  % Resolver MPC
+            optiMPC.set_initial(solutionMPC.value_variables());  % Actualizar condición inicial
+            u_mpc(:, i+1) = solutionMPC.value(u(:, 1));  % Obtener entrada de control
+            optiMPC.set_value(u_last, u_mpc(:, i+1));  % Actualizar última entrada de control
         catch
             disp('MPC Solver failed');
-            u_mpc(:, i+1) = u_mpc(:, i);  % Use previous control input
+            u_mpc(:, i+1) = u_mpc(:, i);  % Usar entrada de control previa
         end
-        
-        %measure time of execution
+
+        % Medir tiempo de ejecución
         elapsed_time(i) = toc;
 
-        % Evolve system
-        
+        % Filtro de Kalman extendido (EKF)
+        % Predicción del estado
+        x_pred = F(x_kalman, u_mpc(:, i), Ts, w, zeros(3,1));
+
+        % Cálculo del Jacobiano de la función de transición de estado
+        theta = x_kalman(3);
+        v = (u_mpc(1, i) + u_mpc(2, i)) / 2;
+        omega = (u_mpc(1, i) - u_mpc(2, i)) / w;
+
+        F_jacobian = [
+            1, 0, -Ts * v * sin(theta);
+            0, 1,  Ts * v * cos(theta);
+            0, 0, 1
+        ];
+
+        % Predicción de la covarianza
+        P_pred = F_jacobian * P_kalman * F_jacobian' + Qk;
+
+        % Actualización
+        % Cálculo del Jacobiano de la función de observación
+        H_jacobian = eye(3);
+
+        % Innovación
+        y_tilde = Qmean(:, i) - x_pred;
+
+        % Ganancia de Kalman
+        S = H_jacobian * P_pred * H_jacobian' + Rk;
+        K = P_pred * H_jacobian' / S;
+
+        % Actualización del estado y de la covarianza
+        x_kalman = x_pred + K * y_tilde;
+        P_kalman = (eye(3) - K * H_jacobian) * P_pred;
+
+        % Guardar el estado estimado por el EKF
+        Qkalman(:, i) = x_kalman;
+
+        % Evolución del sistema
         if i == round(length(qr)/3)
-            Q(:, i) = Q(:, i) + [-1 ; 3 ; pi]; % Evolve system
+            Q(:, i) = Q(:, i) + [-1 ; 3 ; pi]; % Alterar el estado para simular una perturbación
         end
-        Q(:, i+1) = F(Q(:, i), u_mpc(:, i), Ts, w, zeros(3,1)); %+ [1.*randn(2,1);0.1.*randn(1)]; % Evolve system
-        
+        Q(:, i+1) = F(Q(:, i), u_mpc(:, i), Ts, w, zeros(3,1)); % Evolucionar el sistema
     end
 
-    % Filtro de Kalman
-    % Predicción
-    x_kalman = A * x_kalman + B * [u_mpc(:, i); 0]; % Asegúrate de que las dimensiones coincidan
-    P_kalman = A * P_kalman * A' + Qk;
-
-    % Actualización
-    K = P_kalman * H' / (H * P_kalman * H' + Rk);
-    x_kalman = x_kalman + K * (Qmean(:, i) - H * x_kalman);
-    P_kalman = (eye(3) - K * H) * P_kalman;
-
-    % Guardar el estado estimado por el filtro de Kalman
-    Qkalman(:, i) = x_kalman;
-
-
-    %measure time of execution
+    % Medir tiempo de ejecución
     disp('Max elapsed time');
     disp((elapsed_time(i)));
-    
-    % Limpiar el gráfico y volver a dibujar las líneas
+
+    % Actualizar gráficos
     cla;
-    plot(qr(1,1:i), qr(2,1:i), 'k', 'DisplayName', 'Reference Trajectory', 'LineWidth',1.5); % Trajectory reference
-    plot(Q(1,1:i), Q(2,1:i), 'b', 'DisplayName', 'Actual Position', 'LineWidth',1.5);   % Actual Position
-    plot(Qestimated(1,1:i), Qestimated(2,1:i), 'r--', 'DisplayName', 'MHE Position', 'LineWidth',1.5); % Estimated Position
-    plot(Qlpf_estimated(1,1:i), Qlpf_estimated(2,1:i), 'g.', 'DisplayName', 'Mean LPF Position', 'LineWidth',1.5); % Estimated Position
-    plot(Qkalman(1, 1:i), Qkalman(2, 1:i), 'm.', 'DisplayName', 'Kalman Filter Position', 'LineWidth', 1.5); % Estimated Position
-    
-    %plot gps measurements
-    plot(last_measurement(1:2:end-1),last_measurement(2:2:end-1),'ro', 'DisplayName', 'GPS noisy measurements');
+    plot(qr(1,1:i), qr(2,1:i), 'k', 'DisplayName', 'Reference Trajectory', 'LineWidth',1.5); % Trayectoria de referencia
+    plot(Q(1,1:i), Q(2,1:i), 'b', 'DisplayName', 'Actual Position', 'LineWidth',1.5);   % Posición actual
+    plot(Qestimated(1,1:i), Qestimated(2,1:i), 'r--', 'DisplayName', 'MHE Position', 'LineWidth',1.5); % Posición estimada MHE
+    %plot(Qlpf_estimated(1,1:i), Qlpf_estimated(2,1:i), 'g.', 'DisplayName', 'Mean LPF Position', 'LineWidth',1.5); % Posición estimada LPF
+    plot(Qkalman(1, 1:i), Qkalman(2, 1:i), 'm.', 'DisplayName', 'EKF Position', 'LineWidth', 1.5); % Posición estimada EKF
 
+    % Graficar mediciones GPS
+    plot(last_measurement(1:2:end-1), last_measurement(2:2:end-1), 'ro', 'DisplayName', 'GPS noisy measurements');
 
-    % Eliminar el triángulo anterior si existe
+    % Actualizar triángulo de orientación
     if ~isempty(h_triangle)
         delete(h_triangle);
     end
-    % Dibujar la cabeza de la flecha como un triángulo isósceles azul sin bordes
     head_width = 0.3; % Ancho de la cabeza de la flecha
     head_length = head_width; % Longitud de la cabeza de la flecha
     theta = Q(3,i); % Orientación del vehículo
@@ -470,8 +485,8 @@ figure(3);
 subplot(1, 2, 1);
 hold on; grid on;
 plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error');
-plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF');
-plot(t, sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2), 'm', 'DisplayName', 'Norm position error Kalman Filter'); 
+%plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF');
+plot(t, sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2), 'm', 'DisplayName', 'Norm position error EKF'); 
 legend('show');
 title('Norm Position Error');
 xlabel('Time Step');
@@ -481,8 +496,8 @@ ylabel('Norm Position Error');
 subplot(1, 2, 2); 
 hold on; grid on;
 plot(t, abs(Qestimated(3,:) - Q(3,:)), 'r', 'DisplayName', 'Error dir MHE');
-plot(t, abs(Qlpf_estimated(3,:) - Q(3,:)), 'g', 'DisplayName', 'Error dir Mean LPF');
-plot(t, abs(Qkalman(3,:) - Q(3,:)), 'm', 'DisplayName', 'Error dir Kalman Filter');
+%plot(t, abs(Qlpf_estimated(3,:) - Q(3,:)), 'g', 'DisplayName', 'Error dir Mean LPF');
+plot(t, abs(Qkalman(3,:) - Q(3,:)), 'm', 'DisplayName', 'Error dir EKF');
 legend('show');
 title('Error in Direction');
 xlabel('Time Step');
@@ -539,5 +554,3 @@ function Fk = F(q, u, Ts, w, noise)
                    sin(q(3)), 0; 
                            0, 1] *[1/2 1/2; 1/w -1/w]* u + noise;
 end
-
-
