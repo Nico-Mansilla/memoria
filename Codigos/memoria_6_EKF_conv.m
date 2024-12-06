@@ -70,11 +70,6 @@ Jmpc = 0;
 for k = 1:Nc+1
     % Error between predicted state and reference state
     error = qMPC(:,k) - qref;
-    % Ajustar el ángulo para que esté en el rango [-pi, pi]
-    for i = 1:6
-    error(3) = if_else(error(3) > pi, error(3) - 2*pi, error(3));
-    error(3) = if_else(error(3) < -pi, error(3) + 2*pi, error(3));
-    end
 
 
     Jmpc = Jmpc + (error).' * Wmpc * (error);
@@ -113,19 +108,16 @@ optiMPC.solver('ipopt', p_optsMPC, s_optsMPC);
 % *************************************************************************
 % Moving Horizon Estimation (MHE) Parameters:
 % *************************************************************************
-Nh = 60;  % MHE horizon length
+Nh = 50;  % MHE horizon length
 optiMHE = casadi.Opti();
 
 qMHE = optiMHE.variable(nq, Nh+1);  % State estimates
 wMHE = optiMHE.variable(nq, Nh);       % Process noise
 vMHE = optiMHE.variable(nq, Nh+1);       % Measurement noise
 
-slackGps1 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
-slackGps2 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
-slackGps3 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
-slackGps4 = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
-slackmeanGPS = optiMHE.variable(nq, Nh+1); % Slack variable for mean GPS measurements
+alphaMHE = optiMHE.variable(4, Nh+1); % Variables for the mean of the GPS measurements
 
+slackGps = optiMHE.variable(nq, Nh+1); % Slack variables for GPS measurements
 
 y_meas = optiMHE.parameter(4*2+1, Nh+1);     % Measurements
 
@@ -135,9 +127,9 @@ X       = optiMHE.variable(nq);         % Arrival-cost
 xBar    = optiMHE.parameter(nq);        % Initial state for MHE
 
 % Cost matrices for MHE
-Rmhe = diag([gps_noise_factor gps_noise_factor 0.001]*2); %measure cost
+Rmhe = diag([gps_noise_factor gps_noise_factor gyro_noise_factor*2]); %measure cost
 Qmhe = diag([1 1 100]*0.01); % q model cost
-Gmhe = eye(nq)*0.0001; %slack cost
+Gmhe = eye(nq)*0.00001; %slack cost (greater means faster but less accurate)
 Pmhe = diag([gps_noise_factor gps_noise_factor 0.001]); %arribal cost
 
 % *************************************************************************
@@ -149,37 +141,42 @@ Jmhe = X.'*Pmhe*X; % ARRIVAL-COST
 optiMHE.subject_to(X == qMHE(:,1)-xBar);
 
 for k = 1:Nh
-    Jmhe = Jmhe + vMHE(:,k).'*Rmhe*vMHE(:,k) + wMHE(:,k).'*Qmhe*wMHE(:,k)+ slackGps1(:,k)'*Gmhe*slackGps1(:,k) + slackGps2(:,k)'*Gmhe*slackGps2(:,k) + slackGps3(:,k)'*Gmhe*slackGps3(:,k) + slackGps4(:,k)'*Gmhe*slackGps4(:,k);
+    Jmhe = Jmhe + vMHE(:,k).'*Rmhe*vMHE(:,k) + wMHE(:,k).'*Qmhe*wMHE(:,k)+ slackGps(:,k)'*Gmhe*slackGps(:,k);
     
     optiMHE.subject_to(qMHE(:,k+1) == F(qMHE(:,k), uPast(:,k), Ts, w, wMHE(:,k)));
     
 
     % Rotation matrix
-    R = [cos(y_meas(4*2+1,k)), -sin(y_meas(4*2+1,k)), 0;
-         sin(y_meas(4*2+1,k)),  cos(y_meas(4*2+1,k)), 0;
-                            0,                     0, 0];
+    R = [cos(y_meas(4*2+1,k)), -sin(y_meas(4*2+1,k))
+         sin(y_meas(4*2+1,k)),  cos(y_meas(4*2+1,k))];
+
+    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [(y_meas(1:2,k) - R*0.5*[lg ; -wg])*alphaMHE(1,k) + (y_meas(3:4,k) - R*0.5*[lg ; wg])*alphaMHE(2,k) + (y_meas(5:6,k) - R*0.5*[-lg ; wg])*alphaMHE(3,k) + (y_meas(7:8,k) - R*0.5*[-lg ; -wg])*alphaMHE(4,k); y_meas(4*2+1,k)]+slackGps(:,k));
+    optiMHE.subject_to(sum(alphaMHE(:,k))==1);
+    optiMHE.subject_to((0<=alphaMHE(:,k))<=1);
+
 
     % GPS measurements
-    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(1:2,k);y_meas(4*2+1,k)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,k)); 
-    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(3:4,k);y_meas(4*2+1,k)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,k)); 
-    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(5:6,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,k));
-    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(7:8,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,k));
+    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(1:2,k);y_meas(4*2+1,k)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,k)); 
+    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(3:4,k);y_meas(4*2+1,k)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,k)); 
+    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(5:6,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,k));
+    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [y_meas(7:8,k);y_meas(4*2+1,k)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,k));
     %GPS mean 
-    optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [mean([y_meas(1:2,k),y_meas(3:4,k),y_meas(5:6,k),y_meas(7:8,k)],2);y_meas(4*2+1,k)] + mean([slackGps1(:,k),slackGps2(:,k),slackGps3(:,k),slackGps4(:,k)],2) + slackmeanGPS(:,k));
+    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [mean([y_meas(1:2,k),y_meas(3:4,k),y_meas(5:6,k),y_meas(7:8,k)],2);y_meas(4*2+1,k)]);
 end
 
 % Rotation matrix
-R = [cos(y_meas(4*2+1,Nh+1)), -sin(y_meas(4*2+1,Nh+1)), 0;
-     sin(y_meas(4*2+1,Nh+1)),  cos(y_meas(4*2+1,Nh+1)), 0;
-                           0,                        0, 0]; 
+R = [cos(y_meas(4*2+1,Nh+1)), -sin(y_meas(4*2+1,Nh+1));
+     sin(y_meas(4*2+1,Nh+1)),  cos(y_meas(4*2+1,Nh+1))]; 
 %slack variables for GPS measurements
-optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(1:2,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,Nh+1));
-optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(3:4,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,Nh+1)); 
-optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(5:6,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,Nh+1));
-optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(7:8,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,Nh+1));
+%optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(1:2,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,Nh+1));
+%optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(3:4,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[lg ; wg ; 0] + slackGps2(:,Nh+1)); 
+%optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(5:6,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; wg ; 0] + slackGps3(:,Nh+1));
+%optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [y_meas(7:8,Nh+1);y_meas(4*2+1,Nh+1)] - R*0.5*[-lg ; -wg ; 0] + slackGps4(:,Nh+1));
 
 %slack variable for mean GPS measurements
-optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [mean([y_meas(1:2,Nh+1),y_meas(3:4,Nh+1),y_meas(5:6,Nh+1),y_meas(7:8,Nh+1)],2);y_meas(4*2+1,Nh+1)] + mean([slackGps1(:,Nh+1),slackGps2(:,Nh+1),slackGps3(:,Nh+1),slackGps4(:,Nh+1)],2) + slackmeanGPS(:,Nh+1));
+optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [(y_meas(1:2,Nh+1) - R*0.5*[lg ; -wg])*alphaMHE(1,Nh+1) + (y_meas(3:4,Nh+1) - R*0.5*[lg ; wg])*alphaMHE(2,Nh+1) + (y_meas(5:6,Nh+1) - R*0.5*[-lg ; wg])*alphaMHE(3,Nh+1) + (y_meas(7:8,Nh+1) - R*0.5*[-lg ; -wg])*alphaMHE(4,Nh+1) ; y_meas(4*2+1,Nh+1)]+slackGps(:,Nh+1));
+optiMHE.subject_to(sum(alphaMHE(:,Nh+1))==1);
+optiMHE.subject_to((0<=alphaMHE(:,Nh+1))<=1);
 
 Jmhe = Jmhe + vMHE(:,Nh+1).'*Rmhe*vMHE(:,Nh+1);%+ wMHE(:,Nh+1).'*Qmhe*wMHE(:,Nh+1);
 
@@ -484,7 +481,7 @@ figure(3);
 % Primer gráfico a la izquierda
 subplot(1, 2, 1);
 hold on; grid on;
-plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error');
+plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error MHE');
 %plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF');
 plot(t, sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2), 'm', 'DisplayName', 'Norm position error EKF'); 
 legend('show');

@@ -135,9 +135,9 @@ X       = optiMHE.variable(nq);         % Arrival-cost
 xBar    = optiMHE.parameter(nq);        % Initial state for MHE
 
 % Cost matrices for MHE
-Rmhe = diag([gps_noise_factor gps_noise_factor 0.001]*2); %measure cost
+Rmhe = diag([gps_noise_factor gps_noise_factor gyro_noise_factor*2]); %measure cost
 Qmhe = diag([1 1 100]*0.01); % q model cost
-Gmhe = eye(nq)*0.0001; %slack cost
+Gmhe = diag([1 1 100]*0.00001); %slack cost (greater means faster but less accurate)
 Pmhe = diag([gps_noise_factor gps_noise_factor 0.001]); %arribal cost
 
 % *************************************************************************
@@ -484,7 +484,7 @@ figure(3);
 % Primer gráfico a la izquierda
 subplot(1, 2, 1);
 hold on; grid on;
-plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error');
+plot(t, sqrt((Qestimated(1,:)-Q(1,:)).^2 + (Qestimated(2,:)-Q(2,:)).^2), 'r', 'DisplayName', 'Norm position error MHE');
 %plot(t, sqrt((Qlpf_estimated(1,:)-Q(1,:)).^2 + (Qlpf_estimated(2,:)-Q(2,:)).^2), 'g', 'DisplayName', 'Norm position error Mean LPF');
 plot(t, sqrt((Qkalman(1,:)-Q(1,:)).^2 + (Qkalman(2,:)-Q(2,:)).^2), 'm', 'DisplayName', 'Norm position error EKF'); 
 legend('show');
