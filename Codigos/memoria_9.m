@@ -13,7 +13,11 @@ import casadi.*
 % *************************************************************************
 % General Parameters:
 % *************************************************************************
-Ts = 0.100;  % Sampling time
+Ts = 0.1;  % Sampling time sensors in s
+sampling_factor=1000; % Sampling factor for simulation
+sim_Ts = Ts/sampling_factor;  % Simulation sampling time
+
+
 gps_noise_factor = 0.1 * 5;  % GPS noise factor standard deviation
 gps_noise_factor_variance = gps_noise_factor^2;  % GPS noise factor variance
 
@@ -29,6 +33,10 @@ l = 0.544;  % Robot length
 wg = 0.6;  % GPS width
 lg = 0.6;  % GPS length
 
+vel_max = 4;  % Maximum tangent velocity in m/s
+
+wheel_radius = 0.1;  % Wheel radius in meters
+
 % *************************************************************************
 % System's Properties:
 % *************************************************************************
@@ -39,10 +47,13 @@ nr = 3;  % Number of reference states
 % *************************************************************************
 % Model Predictive Control (MPC) Parameters:
 % *************************************************************************
-Nc = 50;  % Control horizon length
+Nc = 30;  % Control horizon length
 
-U_lb = [-4; -4];  % Lower bound for the control inputs
-U_ub = [4; 4];    % Upper bound for the control inputs
+max_angular_velocity = vel_max / wheel_radius;% Maximum angular velocity in rad/s
+wheel_vel = max_angular_velocity/2; % Maximum wheel velocity in rad/s
+
+U_lb = [-wheel_vel; -wheel_vel];  % Lower bound for the control inputs
+U_ub = [wheel_vel; wheel_vel];    % Upper bound for the control inputs
 
 dU_lb = U_lb * 0.1;  % Lower bound for the acceleration
 dU_ub = U_ub * 0.1;  % Upper bound for the acceleration
@@ -109,7 +120,7 @@ optiMPC.solver('ipopt', p_optsMPC, s_optsMPC);
 % *************************************************************************
 % Moving Horizon Estimation (MHE) Parameters:
 % *************************************************************************
-Nh = 60;  % MHE horizon length
+Nh = 40;  % MHE horizon length
 optiMHE = casadi.Opti();
 
 qMHE = optiMHE.variable(nq, Nh + 1);        % State estimates
@@ -118,11 +129,6 @@ vMHE = optiMHE.variable(nq, Nh + 1);        % Measurement noise
 
 alphaMHE = optiMHE.variable(4, Nh+1);       % Convex sum of the GPS measurements
 
-%slackGps1 = optiMHE.variable(nq, Nh + 1);   % Slack variables for GPS measurements
-%slackGps2 = optiMHE.variable(nq, Nh + 1);   % Slack variables for GPS measurements
-%slackGps3 = optiMHE.variable(nq, Nh + 1);   % Slack variables for GPS measurements
-%slackGps4 = optiMHE.variable(nq, Nh + 1);   % Slack variables for GPS measurements
-slackGps = optiMHE.variable(nq, Nh + 1);    % Slack variable for mean GPS measurements
 
 y_meas = optiMHE.parameter(4 * 2 + 1, Nh + 1);  % Measurements
 y_meas_convx = optiMHE.variable(3, Nh + 1);  % Convex sum of the GPS measurements
@@ -132,10 +138,9 @@ X = optiMHE.variable(nq);                   % Arrival-cost
 xBar = optiMHE.parameter(nq);               % Initial state for MHE
 
 % Cost matrices for MHE
-Rmhe = diag([gps_noise_factor^2, gps_noise_factor^2, gyro_noise_factor^2]*4);  % Measurement cost (greater means less confidence)
-Qmhe = diag([1, 1, 0.7] * 3);            % Process noise cost
-Gmhe = diag([1, 1, 1] * 0.01);         % Slack cost (greater means faster but less accurate)(for 0.0001 factor the error is equal to EKF)
-Pmhe = diag([gps_noise_factor^2, gps_noise_factor^2, gyro_noise_factor^2]*4);  % Arrival cost
+Rmhe = diag([1/gps_noise_factor_variance, 1/gps_noise_factor_variance, 1/gyro_noise_factor_variance])*0.1;  % Measurement cost (greater means less confidence)
+Qmhe = diag([1, 1, 1] * 1000);            % Process noise cost
+Pmhe = diag([1/gps_noise_factor_variance, 1/gps_noise_factor_variance, 1/gyro_noise_factor_variance]);  % Arrival cost
 
 % *************************************************************************
 % MHE Objective Function
@@ -145,8 +150,7 @@ Jmhe = X.' * Pmhe * X;  % Arrival cost
 optiMHE.subject_to(X == qMHE(:, 1) - xBar);
 
 for k = 1:Nh
-    Jmhe = Jmhe + vMHE(:, k).' * Rmhe * vMHE(:, k) + wMHE(:, k).' * Qmhe * wMHE(:, k) ...
-        + slackGps(:, k).' * Gmhe * slackGps(:, k);
+    Jmhe = Jmhe + vMHE(:, k).' * Rmhe * vMHE(:, k) + wMHE(:, k).' * Qmhe * wMHE(:, k);
 
     optiMHE.subject_to(qMHE(:, k + 1) == F(qMHE(:, k), uPast(:, k), Ts, w, wMHE(:, k)));
 
@@ -155,8 +159,7 @@ for k = 1:Nh
          sin(y_meas(4 * 2 + 1, k)),  cos(y_meas(4 * 2 + 1, k))];
 
     %Convex sum of the GPS measurements
-    %optiMHE.subject_to(qMHE(:,k) + vMHE(:,k) == [(y_meas(1:2,k)- R * 0.5 * [lg; -wg])*alphaMHE(1,k) + (y_meas(3:4,k)- R * 0.5 * [lg; wg])*alphaMHE(2,k) + (y_meas(5:6,k)- R * 0.5 * [-lg; wg])*alphaMHE(3,k) + (y_meas(7:8,k)- R * 0.5 * [-lg; wg])*alphaMHE(4,k);y_meas(4*2+1,k)] + slackGPS(:,k));%                            [y_meas(1:2,k);y_meas(4*2+1,k)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,k)); 
-
+    
     optiMHE.subject_to(sum(alphaMHE(:,k))==1);
     optiMHE.subject_to((0<=alphaMHE(:,k))<=1);
 
@@ -166,14 +169,7 @@ for k = 1:Nh
                         (y_meas(7:8, k) - R * 0.5 * [-lg; -wg]) * alphaMHE(4, k); y_meas(4 * 2 + 1, k)];
 
     
-    optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == (y_meas_convx (:,k) + slackGps(:, k)));
-    
-
-    % GPS measurements
-    %optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == ([y_meas(1:2, k); y_meas(4 * 2 + 1, k)] - R * 0.5 * [lg; -wg; 0] + slackGps1(:, k)));
-    %optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == ([y_meas(3:4, k); y_meas(4 * 2 + 1, k)] - R * 0.5 * [lg; wg; 0] + slackGps2(:, k))*alphaMHE(2,k));
-    %optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == ([y_meas(5:6, k); y_meas(4 * 2 + 1, k)] - R * 0.5 * [-lg; wg; 0] + slackGps3(:, k))*alphaMHE(3,k));
-    %optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == ([y_meas(7:8, k); y_meas(4 * 2 + 1, k)] - R * 0.5 * [-lg; -wg; 0] + slackGps4(:, k))*alphaMHE(4,k));
+    optiMHE.subject_to(qMHE(:, k) + vMHE(:, k) == (y_meas_convx (:,k)));
     
 end
 
@@ -183,7 +179,6 @@ R = [cos(y_meas(4 * 2 + 1, Nh + 1)), -sin(y_meas(4 * 2 + 1, Nh + 1));
 
 
 %Convex sum of the GPS measurements
-%optiMHE.subject_to(qMHE(:,Nh+1) + vMHE(:,Nh+1) == [(y_meas(1:2,Nh+1)- R * 0.5 * [lg; -wg])*alphaMHE(1,Nh+1) + (y_meas(3:4,Nh+1)- R * 0.5 * [lg; wg])*alphaMHE(2,Nh+1) + (y_meas(5:6,Nh+1)- R * 0.5 * [-lg; wg])*alphaMHE(3,Nh+1) + (y_meas(7:8,Nh+1)- R * 0.5 * [-lg; wg])*alphaMHE(4,Nh+1);y_meas(4*2+1,Nh+1)] + slackGPS(:,Nh+1));%                            [y_meas(1:2,k);y_meas(4*2+1,k)] - R*0.5*[lg ; -wg ; 0] + slackGps1(:,k));
 
 optiMHE.subject_to(sum(alphaMHE(:,Nh+1))==1);
 optiMHE.subject_to((0<=alphaMHE(:,Nh+1))<=1);
@@ -193,13 +188,7 @@ y_meas_convx(:,k) = [(y_meas(1:2, Nh + 1) - R * 0.5 * [lg; -wg]) * alphaMHE(1, N
                 (y_meas(5:6, Nh + 1) - R * 0.5 * [-lg; wg]) * alphaMHE(3, Nh + 1) + ...
                 (y_meas(7:8, Nh + 1) - R * 0.5 * [-lg; -wg]) * alphaMHE(4, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)];
 
-optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == y_meas_convx(:,Nh+1) + slackGps(:, Nh + 1));
-
-% Slack variables for GPS measurements at final step
-%optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == ([y_meas(1:2, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [lg; -wg; 0] + slackGps1(:, Nh + 1))*alphaMHE(1,Nh+1)+([y_meas(3:4, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [lg; wg; 0]  + slackGps2(:, Nh + 1))* alphaMHE(2,Nh+1)+([y_meas(5:6, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [-lg; wg; 0]  + slackGps3(:, Nh + 1))* alphaMHE(3,Nh+1) +([y_meas(7:8, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [-lg; -wg; 0] + slackGps4(:, Nh + 1)) * alphaMHE(4,Nh+1));
-%optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == ([y_meas(3:4, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [lg; wg; 0]  + slackGps2(:, Nh + 1))* alphaMHE(2,Nh+1));
-%optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == ([y_meas(5:6, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [-lg; wg; 0]  + slackGps3(:, Nh + 1))* alphaMHE(3,Nh+1));
-%optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == ([y_meas(7:8, Nh + 1); y_meas(4 * 2 + 1, Nh + 1)] - R * 0.5 * [-lg; -wg; 0] + slackGps4(:, Nh + 1)) * alphaMHE(4,Nh+1));
+optiMHE.subject_to(qMHE(:, Nh + 1) + vMHE(:, Nh + 1) == y_meas_convx(:,Nh+1) );
 
 Jmhe = Jmhe + vMHE(:, Nh + 1).' * Rmhe * vMHE(:, Nh + 1);
 
@@ -220,22 +209,67 @@ optiMHE.solver('ipopt', p_optsMHE, s_optsMHE);
 % *************************************************************************
 % Define Path to Follow
 % *************************************************************************
-t = 0:0.01:2 * pi*1 ;
-x_lim = 5;
-y_lim = 5;
-x_path = x_lim * cos(t);
-y_path = y_lim * sin(t);
-thetaref = unwrap(atan2(diff(y_path), diff(x_path)));
-qr = [x_path; y_path; [thetaref, thetaref(end)]];  % First reference
+
+cicles = 1;  % Number of cicles to complete
+
+ref_samples = 0: sim_Ts :2 * pi * cicles;  % Reference samples
+
+%deltat = 0.01;  % Time step
+
+%t = 0: deltat :2 * pi*1 ;
+
+%x_lim = 5;
+%y_lim = 5;
+
+%x_path = x_lim * cos(t);
+%y_path = y_lim * sin(t);
+%thetaref = unwrap(atan2(diff(y_path), diff(x_path)));
+%qr = [x_path; y_path; [thetaref, thetaref(end)]];  % First reference
 
 % *************************************************************************
 % Lemniscate Path
 % *************************************************************************
-a = 5;  % Scale of the lemniscate
-x_path = a * cos(t) ./ (1 + sin(t).^2);
-y_path = a * sin(t) .* cos(t) ./ (1 + sin(t).^2);
+scale = 4;  % Scale of the lemniscate in meters
+
+x_lim = scale;
+y_lim = scale;
+
+x_path = scale * cos(ref_samples) ./ (1 + sin(ref_samples).^2);
+y_path = scale * sin(ref_samples) .* cos(ref_samples) ./ (1 + sin(ref_samples).^2);
 thetaref = unwrap(atan2(diff(y_path), diff(x_path)));
+
 qr = [x_path; y_path; [thetaref, thetaref(end)]];  % First reference
+
+distance = sqrt(diff(x_path).^2 + diff(y_path).^2); % Distance between points in meters
+total_distance = sum(distance); %total distance of the path
+
+vref = 0.9;  % Velocity of the reference in m/s
+
+total_time = total_distance / vref;  % Total time to complete the path
+
+
+
+t = 0: Ts : total_time;  % Time vector
+
+% Calculate the number of samples needed
+num_samples = length(t);
+
+% Downsample qr to match the length of t
+downsampling_factor = floor(size(qr, 2) / num_samples);
+qr_downsampled = qr(:, 1:downsampling_factor:end);
+
+% Ensure the last point is included
+if size(qr_downsampled, 2) < num_samples
+    qr_downsampled = [qr_downsampled, qr(:, end)];
+end
+
+% Update qr with the downsampled version
+qr = qr_downsampled;
+
+% Recalculate t to have the same number of samples as qr
+num_samples = size(qr, 2);
+t = linspace(0, total_time, num_samples);
+
 
 % *************************************************************************
 % Square Path
@@ -278,6 +312,8 @@ end
 % *************************************************************************
 % Initialization
 % *************************************************************************
+
+
 optiMPC.set_value(u_last, [0; 0]);  % Initialize MPC parameter
 
 q0 = [-2, 1, 1];  % Initial condition
@@ -465,7 +501,7 @@ for i = 1:length(qr)
 
     % Rotate and translate the triangle to the vehicle's position and orientation
     R = [cos(theta), -sin(theta); sin(theta), cos(theta)];
-    triangle = R * [x_triangle + head_length * 0.5; y_triangle];
+    triangle = R * [x_triangle + head_length * 0.5; y_triangle]*scale/4;
     h_triangle = fill(Q(1, i) + triangle(1, :), Q(2, i) + triangle(2, :), 'b', 'EdgeColor', 'none', 'HandleVisibility', 'off');
 
     drawnow;
