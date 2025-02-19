@@ -1,0 +1,5 @@
+roslaunch nmea_navsat_driver nmea_serial_driver.launch port:=/dev/ttyUSB1 baud:=115200 frame_id:=gps_1 topic:=/gps1 node_name:=gps1_node
+roslaunch nmea_navsat_driver nmea_serial_driver.launch port:=/dev/ttyUSB2 baud:=115200 frame_id:=gps_2 topic:=/gps2 node_name:=gps2_node
+
+roslaunch vectornav vectornav.launch serial_port:=/dev/ttyUSB0 serial_baud:=115200 frame_rate:=5 frame_id:=vectornav0 topic:=/gps0
+roslaunch vectornav vectornav.launch serial_port:=/dev/ttyUSB3 serial_baud:=115200 frame_rate:=5 frame_id:=vectornav3 topic:=/gps3
