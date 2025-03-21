@@ -27,17 +27,8 @@ Este repositorio contiene archivos relacionados con la memoria “estimación de
 - ACADO Toolkit si se usa para MPC.
 
 ## Uso
-1. Ejecutar `main_memoria.m` para iniciar el proceso principal.
-2. Para ejecutar el MPC, usar `mpc_RUN.m`.
-3. Asegurarse de que los archivos `.mex` están correctamente compilados para la plataforma usada.
-
-## Notas
-- Los archivos `.mex` pueden requerir recompilación si se usa un sistema diferente.
-- Se recomienda revisar las dependencias y rutas antes de ejecutar los scripts.
-
-## Autores
-- [Tu Nombre]
-
-## Licencia
-Este proyecto se distribuye bajo [Licencia] (por ejemplo, MIT, GPL, etc.).
+1. Extraer los archivos bags .zip.
+2. Ejecutar `bag_plot_extensa.m`.
+3. Ejecutar `bag_plot_ereducida.m`.
+4. Ejecutar  `main_memoria.m`.
 
